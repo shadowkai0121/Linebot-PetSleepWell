@@ -19,6 +19,7 @@ from linebot.v3.webhooks import (
 
 CHANNEL_SECRET = os.environ.get("CHANNEL_SECRET", "")
 CHANNEL_ACCESS_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 CONFIGURATION = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 WEBHOOK_HANDLER = WebhookHandler(CHANNEL_SECRET)
@@ -56,9 +57,6 @@ def lambda_handler(event: dict, context):
 
         Return doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html
     """
-
-    print(
-        "ENV_SNAPSHOT:", {k: (v[:4]+"...")for k, v in os.environ.items() if k.startswith("CHANNEL_")})
 
     headers: dict = event.get("headers", {})
     signature: str = headers.get("X-Line-Signature") or headers.get("x-line-signature")

@@ -28,6 +28,11 @@ Parameters:
     NoEcho: true
     Description: LINE Channel access token 
     Default: ""
+  OpenAiApiKey:
+    Type: String
+    NoEcho: true
+    Description: OpenAI API Key 
+    Default: ""
 
 Resources:
   LineBotFunction:
@@ -48,6 +53,7 @@ Resources:
         Variables:
           CHANNEL_SECRET: !Ref ChannelSecret
           CHANNEL_ACCESS_TOKEN: !Ref ChannelAccessToken
+          OPENAI_API_KEY: !Ref OpenAiApiKey
 
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
