@@ -3,7 +3,7 @@
 version = 0.1
 
 [default.global.parameters]
-stack_name = "linebot-sam"
+stack_name = "PetSleepWell"
 
 [default.build.parameters]
 cached = true
@@ -16,7 +16,7 @@ lint = true
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = true
 resolve_s3 = true
-s3_prefix = "linebot-sam"
+s3_prefix = "PetSleepWell"
 region = "ap-southeast-1"
 profile = "test"
 image_repositories = []
