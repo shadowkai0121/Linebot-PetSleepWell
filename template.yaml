@@ -33,6 +33,10 @@ Parameters:
     NoEcho: true
     Description: OpenAI API Key 
     Default: ""
+  DynamoTableName:
+    Type: String
+    Default: PetSleepWellTable
+    Description: DynamoDB table name
 
 Resources:
   LineBotFunction:
@@ -49,11 +53,15 @@ Resources:
           Properties:
             Path: /
             Method: POST
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoTableName
       Environment:
         Variables:
           CHANNEL_SECRET: !Ref ChannelSecret
           CHANNEL_ACCESS_TOKEN: !Ref ChannelAccessToken
           OPENAI_API_KEY: !Ref OpenAiApiKey
+          TABLE_NAME: !Ref DynamoTableName
 
   ApplicationResourceGroup:
     Type: AWS::ResourceGroups::Group
@@ -68,6 +76,45 @@ Resources:
       ResourceGroupName:
         Ref: ApplicationResourceGroup
       AutoConfigurationEnabled: 'true'
+
+  PetSleepWellTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: PetSleepWellTable
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        # GSI1: ByDate
+        - AttributeName: d
+          AttributeType: S
+        - AttributeName: ts
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI_ByDate
+          KeySchema:
+            - AttributeName: d
+              KeyType: HASH
+            - AttributeName: ts
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: App
+          Value: PetSleepWell
+
 Outputs:
   # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
   # Find out more about other implicit resources you can reference within SAM
@@ -82,3 +129,9 @@ Outputs:
   LineBotFunctionIamRole:
     Description: Implicit IAM Role created for Line Bot function
     Value: !GetAtt LineBotFunctionRole.Arn
+  DynamoTableNameOut:
+    Description: DynamoDB table name
+    Value: !Ref PetSleepWellTable
+  DynamoTableArnOut:
+    Description: DynamoDB table ARN
+    Value: !GetAtt PetSleepWellTable.Arn

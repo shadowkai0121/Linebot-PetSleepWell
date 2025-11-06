@@ -1,5 +1,10 @@
+from datetime import datetime, timezone
 import json
 import os
+import time
+import uuid
+import boto3
+from decimal import Decimal
 
 from linebot.v3 import (
     WebhookHandler
@@ -9,15 +14,25 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
-    TextMessage
+    TextMessage,
+    QuickReply,
+    QuickReplyItem,
+    LocationAction
 )
 from linebot.v3.webhooks import (
+    FollowEvent,
     MessageEvent,
+    LocationMessageContent,
     TextMessageContent
 )
 
 from openai import OpenAI
+from boto3.dynamodb.conditions import Key
 
+
+TABLE_NAME = os.environ["TABLE_NAME"]
+DYNAMO_DB = boto3.resource("dynamodb")
+TABLE = DYNAMO_DB.Table(TABLE_NAME)
 
 CHANNEL_SECRET = os.environ.get("CHANNEL_SECRET", "")
 CHANNEL_ACCESS_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN", "")
@@ -44,6 +59,165 @@ INSTRUCTIONS = """
 - 若請求需要權限或外部存取（例如：讀取使用者位置），請明確說明能力限制與正規取得方式。
 """
 
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def day_str(iso_ts: str) -> str:
+    return iso_ts[:10]  # 'YYYY-MM-DD'
+
+
+def put_message(
+    user_id: str,
+    message_type: str,
+    text: str | None = None,
+    lat: Decimal | None = None,
+    lng: Decimal | None = None,
+    role: str = "user",
+    origin: str = "line-user",
+    reply_to: str | None = None,
+    trace: dict | None = None,
+    indexable: bool | None = None,
+    ttl_days: int = 10
+):
+    ts = now_iso()
+    ulid = uuid.uuid4().hex
+    item = {
+        "pk": f"USER#{user_id}",
+        "sk": f"MSG#{ts}#{ulid}",
+        "type": "message",
+        "role": role,
+        "origin": origin,
+        "messageType": message_type,
+        "ts": ts,
+        "d": day_str(ts),
+        "ttl": int(time.time()) + ttl_days * 24 * 3600
+    }
+    if text is not None:
+        item["text"] = text
+    if lat is not None:
+        item["lat"] = lat
+    if lng is not None:
+        item["lng"] = lng
+    if reply_to:
+        item["replyTo"] = reply_to
+    if trace:
+        item["trace"] = trace
+    if indexable is not None:
+        item["indexable"] = indexable
+    TABLE.put_item(Item=item)
+    return item
+
+
+def put_location(
+    user_id: str,
+    lat: Decimal,
+    lng: Decimal,
+    source: str = "quick-reply",
+    ttl_days: int = 10
+):
+    ts = now_iso()
+    # 歷史一筆
+    TABLE.put_item(Item={
+        "pk": f"USER#{user_id}",
+        "sk": f"LOC#{ts}",
+        "type": "location",
+        "lat": lat, "lng": lng,
+        "source": source,
+        "ts": ts,
+        "d": day_str(ts),
+        "ttl": int(time.time()) + ttl_days * 24 * 3600
+    })
+    # 當前位置
+    TABLE.put_item(Item={
+        "pk": f"USER#{user_id}",
+        "sk": "LOCATION_LATEST",
+        "type": "location_current",
+        "lat": lat, "lng": lng,
+        "updatedAt": ts
+    })
+
+
+def get_recent_messages(user_id: str, limit: int = 20):
+    # sk 以 MSG# 起頭的倒序
+    resp = TABLE.query(
+        KeyConditionExpression=Key("pk").eq(
+            f"USER#{user_id}") & Key("sk").begins_with("MSG#"),
+        ScanIndexForward=False,
+        Limit=limit
+    )
+    return resp.get("Items", [])
+
+
+def get_latest_location(user_id: str):
+    # 先嘗試讀 LOCATION_LATEST
+    res = TABLE.get_item(
+        Key={"pk": f"USER#{user_id}", "sk": "LOCATION_LATEST"})
+    if "Item" in res:
+        return res["Item"]
+    # 不存在就去歷史裡抓最新一筆
+    resp = TABLE.query(
+        KeyConditionExpression=Key("pk").eq(
+            f"USER#{user_id}") & Key("sk").begins_with("LOC#"),
+        ScanIndexForward=False, Limit=1
+    )
+    items = resp.get("Items", [])
+    return items[0] if items else None
+
+
+@WEBHOOK_HANDLER.add(MessageEvent, message=LocationMessageContent)
+def handle_location(event: MessageEvent):
+    user_id = event.source.user_id
+    loc = event.message
+    lat = Decimal(str(loc.latitude))
+    lng = Decimal(str(loc.longitude))
+    addr = getattr(loc, "address", None)
+
+    try:
+        # 寫入「歷史位置」 + 覆蓋「當前位置」
+        put_location(user_id=user_id, lat=lat, lng=lng, source="quick-reply")
+
+        reply = f"已收到你的位置（{lat:.5f}, {lng:.5f}）。"
+        if addr:
+            reply += f" 地址：{addr}"
+    except Exception as e:
+        print(f"[Dynamo ERROR] {type(e).__name__}: {e}", flush=True)
+        reply = "位置接收時發生問題，請再傳一次或稍後再試。"
+
+    with ApiClient(CONFIGURATION) as api_client:
+        api = MessagingApi(api_client)
+        api.reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=reply)]
+            )
+        )
+
+@WEBHOOK_HANDLER.add(FollowEvent)
+def handle_follow(event):
+    with ApiClient(CONFIGURATION) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[
+                    TextMessage(
+                        text=(
+                            "歡迎加入！\n"
+                            "為了提供更準確的附近服務，請傳送你的目前位置"
+                        ),
+                        quick_reply=QuickReply(items=[
+                            QuickReplyItem(
+                                action=LocationAction(label="傳送目前位置")
+                            )
+                        ])
+                    )
+                ]
+            )
+        )
+
+
 @WEBHOOK_HANDLER.add(MessageEvent, message=TextMessageContent)
 def handle_message(event: MessageEvent):
     user_text = event.message.text
@@ -58,7 +232,7 @@ def handle_message(event: MessageEvent):
         reply_text = resp.output_text or "…"
     except Exception as e:
         print(f"[OpenAI ERROR] {type(e).__name__}: {e}", flush=True)
-        reply_text = "目前服務有點忙，我稍後再回覆你一次。"
+        reply_text = "目前有點忙，我稍後再回覆您一次。"
 
     print(f"Prompt: {user_text}")
     print(f"AI Response: {reply_text}")
@@ -95,7 +269,8 @@ def lambda_handler(event: dict, context):
     """
 
     headers: dict = event.get("headers", {})
-    signature: str = headers.get("X-Line-Signature") or headers.get("x-line-signature")
+    signature: str = headers.get(
+        "X-Line-Signature") or headers.get("x-line-signature")
 
     body: str = event.get("body", "")
 
