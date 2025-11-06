@@ -4,6 +4,8 @@ import os
 import time
 import uuid
 import boto3
+import csv
+import math
 from decimal import Decimal
 
 from linebot.v3 import (
@@ -14,6 +16,7 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
+    PushMessageRequest,
     TextMessage,
     QuickReply,
     QuickReplyItem,
@@ -28,7 +31,6 @@ from linebot.v3.webhooks import (
 
 from openai import OpenAI
 from boto3.dynamodb.conditions import Key
-
 
 TABLE_NAME = os.environ["TABLE_NAME"]
 DYNAMO_DB = boto3.resource("dynamodb")
@@ -59,6 +61,38 @@ INSTRUCTIONS = """
 - 若請求需要權限或外部存取（例如：讀取使用者位置），請明確說明能力限制與正規取得方式。
 """
 
+PROVIDERS = []
+with open("providers.csv", newline="", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        try:
+            lat = Decimal(row.get("latitude") or row.get("lat") or 0)
+            lng = Decimal(row.get("longitude") or row.get("lng") or 0)
+            PROVIDERS.append({
+                "name": row.get("名稱") or row.get("name") or "",
+                "addr": row.get("地址") or row.get("address") or "",
+                "url":  row.get("網址") or row.get("url") or "",
+                "line": row.get("LINE") or row.get("line") or "",
+                "lat": lat, "lng": lng
+            })
+        except Exception:
+            pass
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0088
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*math.sin(dlon/2)**2
+    return 2 * R * math.asin(math.sqrt(a))
+
+def find_nearest(lat, lng):
+    best = None
+    bestd = 1e18
+    for p in PROVIDERS:
+        d = haversine_km(lat, lng, p["lat"], p["lng"])
+        if d < bestd:
+            bestd = d; best = (p, d)
+    return best
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -174,25 +208,43 @@ def handle_location(event: MessageEvent):
     lng = Decimal(str(loc.longitude))
     addr = getattr(loc, "address", None)
 
-    try:
-        # 寫入「歷史位置」 + 覆蓋「當前位置」
-        put_location(user_id=user_id, lat=lat, lng=lng, source="quick-reply")
-
-        reply = f"已收到你的位置（{lat:.5f}, {lng:.5f}）。"
-        if addr:
-            reply += f" 地址：{addr}"
-    except Exception as e:
-        print(f"[Dynamo ERROR] {type(e).__name__}: {e}", flush=True)
-        reply = "位置接收時發生問題，請再傳一次或稍後再試。"
-
+    quick = f"已收到你的定位，我來幫你找附近的服務…"
     with ApiClient(CONFIGURATION) as api_client:
         api = MessagingApi(api_client)
-        api.reply_message_with_http_info(
+        api.reply_message(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=reply)]
+                messages=[TextMessage(text=quick)]
             )
         )
+
+    try:
+        put_location(user_id=user_id, lat=Decimal(str(lat)), lng=Decimal(str(lng)), source="quick-reply")
+
+        best = find_nearest(lat, lng)
+        if best and best[0]:
+            p, dkm = best
+            msg = []
+            msg.append("最近的業者")
+            if addr: msg.append(f"你的位置：{addr}")
+            msg.append(f"名稱：{p['name']}")
+            msg.append(f"地址：{p['addr']}")
+            if p['url']:  msg.append(f"網站：{p['url']}")
+            if p['line']: msg.append(f"Line：{p['line']}")
+            msg.append(f"距離：約 {dkm:.1f} 公里")
+            final_text = "\n".join(msg)
+        else:
+            final_text = "附近暫無資料。"
+
+        with ApiClient(CONFIGURATION) as api_client:
+            api = MessagingApi(api_client)
+            api.push_message(PushMessageRequest(
+                to=user_id,
+                messages=[TextMessage(text=final_text)]
+            ))
+    except Exception as e:
+        print(f"[Location ERROR] {type(e).__name__}: {e}", flush=True)
+
 
 @WEBHOOK_HANDLER.add(FollowEvent)
 def handle_follow(event):
