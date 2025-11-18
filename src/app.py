@@ -69,10 +69,11 @@ with open("providers.csv", newline="", encoding="utf-8") as f:
             lat = Decimal(row.get("latitude") or row.get("lat") or 0)
             lng = Decimal(row.get("longitude") or row.get("lng") or 0)
             PROVIDERS.append({
-                "name": row.get("名稱") or row.get("name") or "",
-                "addr": row.get("地址") or row.get("address") or "",
-                "url":  row.get("網址") or row.get("url") or "",
-                "line": row.get("LINE") or row.get("line") or "",
+                "name": row.get("名稱") or "",
+                "tel": row.get("電話") or "",
+                "addr": row.get("地址") or "",
+                "site":  row.get("網址") or "",
+                "line": row.get("LINE") or "",
                 "lat": lat, "lng": lng
             })
         except Exception:
@@ -224,13 +225,15 @@ def handle_location(event: MessageEvent):
         best = find_nearest(lat, lng)
         if best and best[0]:
             p, dkm = best
+            print(p, dkm)
             msg = []
             msg.append("最近的業者")
             if addr: msg.append(f"你的位置：{addr}")
             msg.append(f"名稱：{p['name']}")
+            msg.append(f"電話：{p['tel']}")
+            msg.append(f"Line：{p['line']}")
             msg.append(f"地址：{p['addr']}")
-            if p['url']:  msg.append(f"網站：{p['url']}")
-            if p['line']: msg.append(f"Line：{p['line']}")
+            msg.append(f"網站：{p['site']}")
             msg.append(f"距離：約 {dkm:.1f} 公里")
             final_text = "\n".join(msg)
         else:
@@ -273,6 +276,14 @@ def handle_follow(event):
 @WEBHOOK_HANDLER.add(MessageEvent, message=TextMessageContent)
 def handle_message(event: MessageEvent):
     user_text = event.message.text
+    if user_text[0] == '/':
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({
+                "message": "Line Bot",
+            }),
+        }
     try:
         resp = OPENAI_CLIENT.responses.create(
             model="gpt-4o-mini",
