@@ -31,6 +31,7 @@ from linebot.v3.webhooks import (
 
 from openai import OpenAI
 from boto3.dynamodb.conditions import Key
+import requests
 
 TABLE_NAME = os.environ["TABLE_NAME"]
 DYNAMO_DB = boto3.resource("dynamodb")
@@ -39,6 +40,7 @@ TABLE = DYNAMO_DB.Table(TABLE_NAME)
 CHANNEL_SECRET = os.environ.get("CHANNEL_SECRET", "")
 CHANNEL_ACCESS_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 
 CONFIGURATION = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 WEBHOOK_HANDLER = WebhookHandler(CHANNEL_SECRET)
@@ -79,12 +81,15 @@ with open("providers.csv", newline="", encoding="utf-8") as f:
         except Exception:
             pass
 
+
 def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371.0088
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))*math.sin(dlon/2)**2
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * \
+        math.cos(math.radians(lat2))*math.sin(dlon/2)**2
     return 2 * R * math.asin(math.sqrt(a))
+
 
 def find_nearest(lat, lng):
     best = None
@@ -92,8 +97,10 @@ def find_nearest(lat, lng):
     for p in PROVIDERS:
         d = haversine_km(lat, lng, p["lat"], p["lng"])
         if d < bestd:
-            bestd = d; best = (p, d)
+            bestd = d
+            best = (p, d)
     return best
+
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -201,6 +208,109 @@ def get_latest_location(user_id: str):
     return items[0] if items else None
 
 
+def get_places_comment(name: str, lat: Decimal, lng: Decimal) -> list:
+    url = "https://places.googleapis.com/v1/places:searchText"
+
+    payload = {
+        "textQuery": name,
+        "locationBias": {
+            "circle": {
+                "center": {
+                    "latitude": lat,
+                    "longitude": lng,
+                },
+                "radius": 1000.0
+            }
+        }
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_API_KEY,
+        "X-Goog-FieldMask": "places.id,places.displayName"
+    }
+
+    resp = requests.post(url, json=payload, headers=headers)
+
+    resp = resp.json()["places"][0]
+    id = resp.get("id")
+
+    url = f"https://places.googleapis.com/v1/places/{id}"
+    headers["X-Goog-FieldMask"] = "id,rating,googleMapsUri,regularOpeningHours.weekdayDescriptions,reviews.rating,reviews.relativePublishTimeDescription,reviews.text.text"
+    # headers["X-Goog-FieldMask"] = "*"
+    params = {
+        "languageCode": "zh-TW",
+    }
+
+    resp = requests.get(url, params=params, headers=headers)
+    resp = resp.json()
+
+    data = {
+        "name": name,
+        "rating": resp["rating"],
+        "googleMapsUri": resp["googleMapsUri"],
+        "regularOpeningHours": "\n".join(resp["regularOpeningHours"]["weekdayDescriptions"]),
+        "reviews": [],
+    }
+    for review in resp["reviews"]:
+        data["reviews"].append({
+            "published": review["relativePublishTimeDescription"],
+            "rating": review["rating"],
+            "text": review["text"]["text"]
+        })
+
+    return data
+
+
+COMMENT_INSTRUCTION = """
+You are a professional recommendation-summary generator for Google Maps places. 
+Your role is to read the structured JSON place data sent by the user and produce a 
+concise, neutral, and informative summary in Traditional Chinese, approximately 
+150 characters. Your summary is intended for consumers evaluating a service provider.
+
+=== Core Responsibilities ===
+1. Analyze and summarize the place using:
+   - Name, rating, and opening hours
+   - Review content (sentiment, themes, frequency)
+   - Any additional information retrieved by Web Search
+
+2. When the provided JSON does not contain enough information to form a reliable 
+   150-character recommendation summary, or if certain aspects require confirmation 
+   (e.g., service風評、價格透明度、企業背景、分店資訊、是否有爭議報導), 
+   you MUST automatically call the `web.run` tool to search for additional information.
+   Your search queries should generally be based on:
+   - The place name (e.g., "<店名> 評價", "<店名> 喪禮", "<店名> 服務")
+   - Related keywords inferred from the reviews if necessary.
+
+3. After Web Search results return, integrate:
+   - Key facts
+   - Repeated patterns
+   - High-signal information
+   - Cross-source sentiment trends
+   into a single objective, consumer-friendly summary.
+
+4. Maintain neutrality:
+   - If reviews include both praise and complaints, reflect this contrast.
+   - Avoid exaggeration, speculation, or invented details.
+   - Do not quote reviews directly or list bullet points.
+
+5. Writing rules:
+   - Traditional Chinese only
+   - Single paragraph (no bullet points)
+   - Around 150 characters (±10%)
+   - Focus on: 服務態度、流程專業、價格透明度、環境品質、可信度
+   - Do not include URLs, citations, or tool call details.
+
+=== Output Format ===
+Your final answer must follow this code block:
+
+```
+約200字的推薦摘要"
+```
+Only output valid Plain Text.
+"""
+
+
 @WEBHOOK_HANDLER.add(MessageEvent, message=LocationMessageContent)
 def handle_location(event: MessageEvent):
     user_id = event.source.user_id
@@ -220,31 +330,54 @@ def handle_location(event: MessageEvent):
         )
 
     try:
-        put_location(user_id=user_id, lat=Decimal(str(lat)), lng=Decimal(str(lng)), source="quick-reply")
+        put_location(user_id=user_id, lat=Decimal(str(lat)),
+                     lng=Decimal(str(lng)), source="quick-reply")
 
         best = find_nearest(lat, lng)
         if best and best[0]:
             p, dkm = best
-            print(p, dkm)
+            info = get_places_comment(p['name'], p["lat"], p["lng"])
+
             msg = []
             msg.append("最近的業者")
-            if addr: msg.append(f"你的位置：{addr}")
             msg.append(f"名稱：{p['name']}")
             msg.append(f"電話：{p['tel']}")
             msg.append(f"Line：{p['line']}")
             msg.append(f"地址：{p['addr']}")
             msg.append(f"網站：{p['site']}")
-            msg.append(f"距離：約 {dkm:.1f} 公里")
-            final_text = "\n".join(msg)
+            msg.append(f"服務時間：\n{info['regularOpeningHours']}")
+            quick = "\n".join(msg)
         else:
-            final_text = "附近暫無資料。"
+            quick = "附近暫無資料。"
 
         with ApiClient(CONFIGURATION) as api_client:
             api = MessagingApi(api_client)
             api.push_message(PushMessageRequest(
                 to=user_id,
-                messages=[TextMessage(text=final_text)]
+                messages=[TextMessage(text=quick)]
             ))
+
+        try:
+            resp = OPENAI_CLIENT.responses.create(
+                model="gpt-4o",
+                instructions=COMMENT_INSTRUCTION,
+                input=json.dumps(info, ensure_ascii=False),
+                max_output_tokens=2048,
+                temperature=0.8,
+            )
+            reply_text = resp.output_text.replace("```", "").strip() or "…"
+        except Exception as e:
+            print(f"[OpenAI ERROR] {type(e).__name__}: {e}", flush=True)
+            reply_text = "目前有點忙，我稍後再回覆您一次。"
+
+        with ApiClient(CONFIGURATION) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            line_bot_api.push_message(
+                PushMessageRequest(
+                    to=user_id,
+                    messages=[TextMessage(text=reply_text)]
+                )
+            )
     except Exception as e:
         print(f"[Location ERROR] {type(e).__name__}: {e}", flush=True)
 
@@ -297,6 +430,7 @@ def handle_message(event: MessageEvent):
         print(f"[OpenAI ERROR] {type(e).__name__}: {e}", flush=True)
         reply_text = "目前有點忙，我稍後再回覆您一次。"
 
+    #
     print(f"Prompt: {user_text}")
     print(f"AI Response: {reply_text}")
 

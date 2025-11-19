@@ -33,6 +33,11 @@ Parameters:
     NoEcho: true
     Description: OpenAI API Key 
     Default: ""
+  GoogleApiKey:
+    Type: String
+    NoEcho: true
+    Description: Google API Key 
+    Default: ""
   DynamoTableName:
     Type: String
     Default: PetSleepWellTable
@@ -61,6 +66,7 @@ Resources:
           CHANNEL_SECRET: !Ref ChannelSecret
           CHANNEL_ACCESS_TOKEN: !Ref ChannelAccessToken
           OPENAI_API_KEY: !Ref OpenAiApiKey
+          GOOGLE_API_KEY: !Ref GoogleApiKey
           TABLE_NAME: !Ref DynamoTableName
 
   ApplicationResourceGroup:
