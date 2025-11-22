@@ -339,23 +339,23 @@ def handle_location(event: MessageEvent):
             info = get_places_comment(p['name'], p["lat"], p["lng"])
 
             msg = []
-            msg.append("最近的業者")
+            # msg.append("最近的業者")
             msg.append(f"名稱：{p['name']}")
-            msg.append(f"電話：{p['tel']}")
-            msg.append(f"Line：{p['line']}")
-            msg.append(f"地址：{p['addr']}")
+            # msg.append(f"電話：{p['tel']}")
+            # msg.append(f"Line：{p['line']}")
+            # msg.append(f"地址：{p['addr']}")
             msg.append(f"網站：{p['site']}")
-            msg.append(f"服務時間：\n{info['regularOpeningHours']}")
-            quick = "\n".join(msg)
+            # msg.append(f"服務時間：\n{info['regularOpeningHours']}")
+            reply_text = "\n".join(msg) + '\n'
         else:
-            quick = "附近暫無資料。"
+            reply_text = "附近暫無資料。"
 
-        with ApiClient(CONFIGURATION) as api_client:
-            api = MessagingApi(api_client)
-            api.push_message(PushMessageRequest(
-                to=user_id,
-                messages=[TextMessage(text=quick)]
-            ))
+        # with ApiClient(CONFIGURATION) as api_client:
+        #     api = MessagingApi(api_client)
+        #     api.push_message(PushMessageRequest(
+        #         to=user_id,
+        #         messages=[TextMessage(text=reply_text)]
+        #     ))
 
         try:
             resp = OPENAI_CLIENT.responses.create(
@@ -365,7 +365,7 @@ def handle_location(event: MessageEvent):
                 max_output_tokens=2048,
                 temperature=0.8,
             )
-            reply_text = resp.output_text.replace("```", "").strip() or "…"
+            reply_text += resp.output_text.replace("```", "").strip() or "…"
         except Exception as e:
             print(f"[OpenAI ERROR] {type(e).__name__}: {e}", flush=True)
             reply_text = "目前有點忙，我稍後再回覆您一次。"
