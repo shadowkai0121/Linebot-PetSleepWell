@@ -20,7 +20,12 @@ from linebot.v3.messaging import (
     TextMessage,
     QuickReply,
     QuickReplyItem,
-    LocationAction
+    LocationAction,
+    TemplateMessage,
+    CarouselTemplate,
+    CarouselColumn,
+    MessageAction,
+    URIAction
 )
 from linebot.v3.webhooks import (
     FollowEvent,
@@ -101,6 +106,12 @@ def find_nearest(lat, lng):
             best = (p, d)
     return best
 
+def find_sorted_providers(lat, lng):
+    results = []
+    for p in PROVIDERS:
+        d = haversine_km(lat, lng, p["lat"], p["lng"])
+        results.append((p, d))
+    return sorted(results, key=lambda x: x[1])
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -227,7 +238,8 @@ def get_places_comment(name: str, lat: Decimal, lng: Decimal) -> list:
     headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": GOOGLE_API_KEY,
-        "X-Goog-FieldMask": "places.id,places.displayName"
+        "X-Goog-FieldMask": "places.id,places.displayName",
+        # "X-Goog-FieldMask": "*",
     }
 
     resp = requests.post(url, json=payload, headers=headers)
@@ -236,7 +248,7 @@ def get_places_comment(name: str, lat: Decimal, lng: Decimal) -> list:
     id = resp.get("id")
 
     url = f"https://places.googleapis.com/v1/places/{id}"
-    headers["X-Goog-FieldMask"] = "id,rating,googleMapsUri,regularOpeningHours.weekdayDescriptions,reviews.rating,reviews.relativePublishTimeDescription,reviews.text.text"
+    headers["X-Goog-FieldMask"] = "id,rating,googleMapsUri,websiteUri,regularOpeningHours.weekdayDescriptions,reviews.rating,reviews.relativePublishTimeDescription,reviews.text.text,photos.name"
     # headers["X-Goog-FieldMask"] = "*"
     params = {
         "languageCode": "zh-TW",
@@ -247,6 +259,7 @@ def get_places_comment(name: str, lat: Decimal, lng: Decimal) -> list:
 
     data = {
         "name": name,
+        "site": resp.get("websiteUri"),
         "rating": resp["rating"],
         "googleMapsUri": resp["googleMapsUri"],
         "regularOpeningHours": "\n".join(resp["regularOpeningHours"]["weekdayDescriptions"]),
@@ -275,7 +288,7 @@ concise, neutral, and informative summary in Traditional Chinese, approximately
    - Any additional information retrieved by Web Search
 
 2. When the provided JSON does not contain enough information to form a reliable 
-   150-character recommendation summary, or if certain aspects require confirmation 
+   50-character recommendation summary, or if certain aspects require confirmation 
    (e.g., service風評、價格透明度、企業背景、分店資訊、是否有爭議報導), 
    you MUST automatically call the `web.run` tool to search for additional information.
    Your search queries should generally be based on:
@@ -297,7 +310,6 @@ concise, neutral, and informative summary in Traditional Chinese, approximately
 5. Writing rules:
    - Traditional Chinese only
    - Single paragraph (no bullet points)
-   - Around 150 characters (±10%)
    - Focus on: 服務態度、流程專業、價格透明度、環境品質、可信度
    - Do not include URLs, citations, or tool call details.
 
@@ -305,7 +317,7 @@ concise, neutral, and informative summary in Traditional Chinese, approximately
 Your final answer must follow this code block:
 
 ```
-約200字的推薦摘要"
+約 50 字的推薦摘要"
 ```
 Only output valid Plain Text.
 """
@@ -329,57 +341,56 @@ def handle_location(event: MessageEvent):
             )
         )
 
-    try:
-        put_location(user_id=user_id, lat=Decimal(str(lat)),
-                     lng=Decimal(str(lng)), source="quick-reply")
+    carousel_columns = []
 
-        best = find_nearest(lat, lng)
-        if best and best[0]:
-            p, dkm = best
+    try: 
+        stores = find_sorted_providers(lat, lng)
+        for store in stores[:3]:
+            p, dkm = store
             info = get_places_comment(p['name'], p["lat"], p["lng"])
+            site = info.get('site') or p['site']
 
-            msg = []
-            # msg.append("最近的業者")
-            msg.append(f"名稱：{p['name']}")
-            # msg.append(f"電話：{p['tel']}")
-            # msg.append(f"Line：{p['line']}")
-            # msg.append(f"地址：{p['addr']}")
-            msg.append(f"網站：{p['site']}")
-            # msg.append(f"服務時間：\n{info['regularOpeningHours']}")
-            reply_text = "\n".join(msg) + '\n'
-        else:
-            reply_text = "附近暫無資料。"
-
-        # with ApiClient(CONFIGURATION) as api_client:
-        #     api = MessagingApi(api_client)
-        #     api.push_message(PushMessageRequest(
-        #         to=user_id,
-        #         messages=[TextMessage(text=reply_text)]
-        #     ))
-
-        try:
             resp = OPENAI_CLIENT.responses.create(
                 model="gpt-4o",
                 instructions=COMMENT_INSTRUCTION,
                 input=json.dumps(info, ensure_ascii=False),
-                max_output_tokens=2048,
-                temperature=0.8,
+                max_output_tokens=64,
+                temperature=0.9,
             )
-            reply_text += resp.output_text.replace("```", "").strip() or "…"
-        except Exception as e:
-            print(f"[OpenAI ERROR] {type(e).__name__}: {e}", flush=True)
-            reply_text = "目前有點忙，我稍後再回覆您一次。"
 
+            carousel_columns.append(
+                CarouselColumn(
+                    text=p['name'] + '\n' + resp.output_text.replace("```", "").strip(),
+                    actions=[
+                        URIAction(label="開啟網站", uri=site)
+                    ]
+                )
+            )
+
+    except Exception as e:
+        print(f"[Location ERROR] {type(e).__name__}: {e}", flush=True)
         with ApiClient(CONFIGURATION) as api_client:
             line_bot_api = MessagingApi(api_client)
             line_bot_api.push_message(
                 PushMessageRequest(
                     to=user_id,
-                    messages=[TextMessage(text=reply_text)]
+                    messages=[TextMessage(text='服務忙碌中，請稍後再嘗試。')]
                 )
             )
-    except Exception as e:
-        print(f"[Location ERROR] {type(e).__name__}: {e}", flush=True)
+
+    carousel_template = CarouselTemplate(columns=carousel_columns)
+    message = TemplateMessage(
+        alt_text="Store Informations",
+        template=carousel_template
+    )
+    with ApiClient(CONFIGURATION) as api_client:
+        line_bot_api = MessagingApi(api_client)
+        line_bot_api.push_message(
+            PushMessageRequest(
+                to=user_id,
+                messages=[message]
+            )
+        )
 
 
 @WEBHOOK_HANDLER.add(FollowEvent)
@@ -429,10 +440,6 @@ def handle_message(event: MessageEvent):
     except Exception as e:
         print(f"[OpenAI ERROR] {type(e).__name__}: {e}", flush=True)
         reply_text = "目前有點忙，我稍後再回覆您一次。"
-
-    #
-    print(f"Prompt: {user_text}")
-    print(f"AI Response: {reply_text}")
 
     with ApiClient(CONFIGURATION) as api_client:
         line_bot_api = MessagingApi(api_client)
